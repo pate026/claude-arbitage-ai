@@ -29,12 +29,21 @@ from statistics import mean, pstdev
 from pathlib import Path
 
 from web3 import Web3
+from decimal import Decimal, getcontext
+import os
+from dotenv import load_dotenv
+
+getcontext().prec = 50
+
+load_dotenv()
 
 # ----------------------------------------------------------------------
 # KONFIGURAATIO — muokkaa nämä omiin arvoihisi
 # ----------------------------------------------------------------------
 
-RPC_URL = "https://137.rpc.thirdweb.com/<CLIENT_ID>"   # thirdweb Polygon RPC
+RPC_URL = os.getenv("RPC_URL")
+if not RPC_URL:
+    raise RuntimeError("RPC_URL puuttuu .env-tiedostosta")
 POLL_INTERVAL_SECONDS = 10
 
 WETH = Web3.to_checksum_address("0x7ceB23fD6bC0adD59E62ac25578270cFf1b9f619")
@@ -46,7 +55,7 @@ UNISWAP_FEE_TIER = 500  # 0.05%
 
 # QuickSwap V3 (Algebra) Quoter (Polygon) — tarkista ajantasainen osoite
 # quickswap docs / polygonscan ennen käyttöä
-QUICKSWAP_QUOTER = Web3.to_checksum_address("0xa15F0D7377B2A0C0c10db057f641beD21028FC89")
+QUICKSWAP_QUOTER = Web3.to_checksum_address("0xa77aD9f635a3FB3bCCC5E6d1A87cB269746Aba17")
 
 TRADE_SIZE_WETH = 1.0          # simuloidaan tällä koolla
 FLASH_LOAN_FEE_BPS = 5         # Aave v3 flash loan fee ~0.05% = 5 bps
@@ -83,16 +92,73 @@ UNISWAP_QUOTER_ABI = json.loads("""
 """)
 
 QUICKSWAP_QUOTER_ABI = json.loads("""
-[{"inputs":[{"internalType":"address","name":"tokenIn","type":"address"},
+[{"inputs":[{"components":[{"internalType":"address","name":"tokenIn","type":"address"},
 {"internalType":"address","name":"tokenOut","type":"address"},
-{"internalType":"uint256","name":"amountIn","type":"uint256"}],
+{"internalType":"uint256","name":"amountIn","type":"uint256"},
+{"internalType":"uint160","name":"limitSqrtPrice","type":"uint160"}],
+"internalType":"struct IQuoterV2.QuoteExactInputSingleParams","name":"params","type":"tuple"}],
 "name":"quoteExactInputSingle",
-"outputs":[{"internalType":"uint256","name":"amountOut","type":"uint256"}],
+"outputs":[{"internalType":"uint256","name":"amountOut","type":"uint256"},
+{"internalType":"uint160","name":"sqrtPriceX96After","type":"uint160"},
+{"internalType":"uint32","name":"initializedTicksCrossed","type":"uint32"},
+{"internalType":"uint256","name":"gasEstimate","type":"uint256"}],
 "stateMutability":"nonpayable","type":"function"}]
 """)
 
 uniswap_quoter = w3.eth.contract(address=UNISWAP_QUOTER_V2, abi=UNISWAP_QUOTER_ABI)
 quickswap_quoter = w3.eth.contract(address=QUICKSWAP_QUOTER, abi=QUICKSWAP_QUOTER_ABI)
+
+# ----------------------------------------------------------------------
+# QuickSwap-hinta luetaan SUORAAN poolista (globalState), ei Quoterin
+# kautta - Quoter-kutsu revertoi selvittamattomasta ABI-erosta, mutta
+# suora pooliluku on todistetusti toimiva (sama tekniikka kuin
+# cross_dex_arb_v3.py:ssa).
+# ----------------------------------------------------------------------
+
+WETH_DECIMALS = 18
+USDC_DECIMALS = 6
+
+ALGEBRA_FACTORY = Web3.to_checksum_address("0x411b0fAcC3489691f28ad58c47006AF5E3Ab3A28")
+
+ALGEBRA_FACTORY_ABI = json.loads(
+    '[{"inputs":[{"internalType":"address","name":"tokenA","type":"address"},'
+    '{"internalType":"address","name":"tokenB","type":"address"}],'
+    '"name":"poolByPair","outputs":[{"internalType":"address","name":"pool","type":"address"}],'
+    '"stateMutability":"view","type":"function"}]'
+)
+
+ALGEBRA_POOL_ABI = json.loads(
+    '[{"inputs":[],"name":"globalState","outputs":['
+    '{"internalType":"uint160","name":"price","type":"uint160"},'
+    '{"internalType":"int24","name":"tick","type":"int24"},'
+    '{"internalType":"uint16","name":"fee","type":"uint16"},'
+    '{"internalType":"uint16","name":"timepointIndex","type":"uint16"},'
+    '{"internalType":"uint8","name":"communityFeeToken0","type":"uint8"},'
+    '{"internalType":"uint8","name":"communityFeeToken1","type":"uint8"},'
+    '{"internalType":"bool","name":"unlocked","type":"bool"}],'
+    '"stateMutability":"view","type":"function"},'
+    '{"inputs":[],"name":"token0","outputs":[{"internalType":"address","name":"","type":"address"}],'
+    '"stateMutability":"view","type":"function"}]'
+)
+
+algebra_factory = w3.eth.contract(address=ALGEBRA_FACTORY, abi=ALGEBRA_FACTORY_ABI)
+QUICK_POOL = algebra_factory.functions.poolByPair(WETH, USDC).call()
+quick_pool = w3.eth.contract(address=QUICK_POOL, abi=ALGEBRA_POOL_ABI)
+QUICK_TOKEN0 = quick_pool.functions.token0().call()
+
+
+def sqrt_price_to_usdc_out(sqrt_price_x96: int, token0: str, amount_in_weth_wei: int) -> int:
+    """Arvio amountOut (raw USDC) poolin hetkellisesta hinnasta. Ei slippagea."""
+    ratio = Decimal(sqrt_price_x96) / (Decimal(2) ** 96)
+    price_raw = ratio * ratio
+    amount_in_human = Decimal(amount_in_weth_wei) / (Decimal(10) ** WETH_DECIMALS)
+    if token0.lower() == WETH.lower():
+        price_human = price_raw * (Decimal(10) ** (WETH_DECIMALS - USDC_DECIMALS))
+        out_human = amount_in_human * price_human
+    else:
+        price_human = price_raw * (Decimal(10) ** (USDC_DECIMALS - WETH_DECIMALS))
+        out_human = amount_in_human / price_human
+    return int(out_human * (Decimal(10) ** USDC_DECIMALS))
 
 
 @dataclass
@@ -114,9 +180,9 @@ def get_uniswap_quote(amount_in_wei: int) -> Quote:
 
 
 def get_quickswap_quote(amount_in_wei: int) -> Quote:
-    amount_out = quickswap_quoter.functions.quoteExactInputSingle(
-        WETH, USDC, amount_in_wei
-    ).call()
+    global_state = quick_pool.functions.globalState().call()
+    sqrt_price_x96 = global_state[0]
+    amount_out = sqrt_price_to_usdc_out(sqrt_price_x96, QUICK_TOKEN0, amount_in_wei)
     return Quote(dex="quickswap", amount_out=amount_out)
 
 
