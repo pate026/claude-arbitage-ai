@@ -13,6 +13,7 @@ const input = {
       '*': { '*': ['abi', 'evm.bytecode.object'] },
     },
     optimizer: { enabled: true, runs: 200 },
+    viaIR: true,
   },
 };
 
