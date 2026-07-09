@@ -12,6 +12,18 @@ MUUTOKSET v2:een:
 """
 
 import time
+import os
+from dotenv import load_dotenv
+
+load_dotenv()
+import os
+from dotenv import load_dotenv
+
+load_dotenv()
+import os
+from dotenv import load_dotenv
+
+load_dotenv()
 import json
 import logging
 from collections import deque
@@ -26,8 +38,10 @@ getcontext().prec = 50
 # KONFIGURAATIO
 # ----------------------------------------------------------------------
 
-RPC_URL = "https://137.rpc.thirdweb.com/637c099dc97da50666475de7ae1022de"
-POLL_INTERVAL_SECONDS = 10
+RPC_URL = os.getenv("RPC_URL")
+if not RPC_URL:
+    raise RuntimeError("RPC_URL puuttuu .env-tiedostosta")
+POLL_INTERVAL_SECONDS = int(os.getenv("POLL_INTERVAL_SECONDS", 10))
 
 WETH = Web3.to_checksum_address("0x7ceB23fD6bC0adD59E62ac25578270cFf1b9f619")
 USDC = Web3.to_checksum_address("0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174")
@@ -42,9 +56,9 @@ ALGEBRA_FACTORY = Web3.to_checksum_address("0x411b0fAcC3489691f28ad58c47006AF5E3
 # Multicall3 - sama osoite kaikilla EVM-ketjuilla
 MULTICALL3 = Web3.to_checksum_address("0xcA11bde05977b3631167028862bE2a173976CA11")
 
-TRADE_SIZE_WETH = 1.0
+TRADE_SIZE_WETH = float(os.getenv("TRADE_SIZE_WETH", 1.0))
 FLASH_LOAN_FEE_BPS = 5
-MIN_PROFIT_USD = 2.0
+MIN_PROFIT_USD = float(os.getenv("MIN_PROFIT_USD", 2.0))
 GAS_ESTIMATE_USD = 0.05
 
 HISTORY_WINDOW = 60
